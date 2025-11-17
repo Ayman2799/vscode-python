@@ -1,0 +1,435 @@
+helpme-website/
+│── backend/
+
+│    ├── snpm init -y
+npm install express mongoose bcryptjs jsonwebtoken cors helmet express-rate-limit csurf cookie-parser dotenv
+server.js
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const connectDB = require("./config/db");
+const { helmet, limiter } = require("./middleware/securityMiddleware");
+
+const app = express();
+
+// Security
+app.use(helmet());
+app.use(limiter());
+app.use(cors());
+app.use(express.json());
+
+// Routes
+app.use("/auth", require("./routes/authRoutes"));
+app.use("/request", require("./routes/requestRoutes"));
+
+// Connect database
+connectDB();
+
+app.listen(5000, () => console.log("🚀 Server running on port 5000"));
+
+│    ├── routes/
+│    │     ├── authRoutes.js
+const express = require("express");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+const router = express.Router();
+
+// Register
+router.post("/register", async (req, res) => {
+    const { name, email, password } = req.body;
+
+    const exists = await User.findOne({ email });
+    if (exists) return res.json({ msg: "Email already used" });
+
+    const hash = await bcrypt.hash(password, 10);
+
+    const newUser = new User({
+        name,
+        email,
+        password: hash
+    });
+
+    await newUser.save();
+    res.json({ msg: "User registered successfully" });
+});
+
+// Login
+router.post("/login", async (req, res) => {
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email });
+    if(!user) return res.json({ msg: "User not found" });
+
+    const match = await bcrypt.compare(password, user.password);
+    if(!match) return res.json({ msg: "Wrong password" });
+
+    const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET);
+
+    res.json({ msg: "Logged in", token });
+});
+
+module.exports = router;
+
+│    │     ├── requestRoutes.js
+const express = require("express");
+const Request = require("../models/Request");
+const auth = require("../middleware/authMiddleware");
+const router = express.Router();
+
+// Create request
+router.post("/create", auth, async (req, res) => {
+    const newReq = new Request({
+        ...req.body,
+        userId: req.user.id
+    });
+    await newReq.save();
+    res.json({ msg: "Request created" });
+});
+
+// Get all requests
+router.get("/all", async (req, res) => {
+    const data = await Request.find().sort({ createdAt: -1 });
+    res.json(data);
+});
+
+module.exports = router;
+
+│    ├── models/
+│    │     ├── User.js
+const mongoose = require("mongoose");
+
+const userSchema = new mongoose.Schema({
+    name: String,
+    email: { type: String, unique: true },
+    password: String,
+    role: { type: String, default: "user" }
+});
+
+module.exports = mongoose.model("User", userSchema);
+
+│    │     ├── Request.js
+const mongoose = require("mongoose");
+
+const requestSchema = new mongoose.Schema({
+    userId: String,
+    type: String,
+    name: String,
+    city: String,
+    phone: String,
+    blood: String,
+    description: String,
+    gps: String,
+    createdAt: { type: Date, default: Date.now }
+});
+
+module.exports = mongoose.model("Request", requestSchema);
+
+│    ├── middleware/
+│    │     ├── authMiddleware.js
+const jwt = require("jsonwebtoken");
+
+module.exports = function (req, res, next) {
+    const token = req.headers["authorization"];
+    if (!token) return res.status(401).json({ msg: "Access denied" });
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded;
+        next();
+    } catch {
+        res.status(403).json({ msg: "Invalid token" });
+    }
+};
+
+│    │     ├── securityMiddleware.js
+const rateLimit = require("express-rate-limit");
+const helmet = require("helmet");
+
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 100,
+    message: "❌ Too many requests, please try again later."
+});
+
+module.exports = {
+    helmet,
+    limiter
+};
+
+│    ├── config/
+│          ├── db.js
+const mongoose = require("mongoose");
+
+const connectDB = async () => {
+    try {
+        await mongoose.connect(process.env.MONGO_URI);
+        console.log("✔️ Connected to MongoDB");
+    } catch (err) {
+        console.error("❌ Database connection failed", err);
+        process.exit(1);
+    }
+};
+
+module.exports = connectDB;
+
+│
+│── frontend/
+     ├── index.html
+     <!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Home - Blood Requests</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="header">
+    <h2>لوحة الطلبات</h2>
+    <div>
+      <a class="btn" href="register.html">Register</a>
+      <a class="btn" href="login.html">Login</a>
+      <a class="btn" href="create-request.html">Create Request</a>
+      <a class="btn" href="requests.html">View Requests</a>
+      <a class="btn" href="admin.html">Admin</a>
+    </div>
+  </div>
+
+  <div id="content"></div>
+
+  <script>
+    const API_BASE = "http://localhost:5000/api";
+    async function loadLatest(){
+      const res = await fetch(`${API_BASE}/request/all?page=1&limit=5`);
+      const json = await res.json();
+      const content = document.getElementById("content");
+      content.innerHTML = "";
+      if(json.data && json.data.length){
+        json.data.forEach(r => {
+          const div = document.createElement("div");
+          div.className = "card";
+          div.innerHTML = `<strong>${r.type} — ${r.name}</strong><p class="small">${r.city} · ${r.blood} · ${new Date(r.createdAt).toLocaleString()}</p>
+          <p>${r.description || ""}</p>`;
+          content.appendChild(div);
+        });
+      } else {
+        content.innerHTML = `<p class="small">لا توجد طلبات حالياً.</p>`;
+      }
+    }
+    loadLatest();
+  </script>
+</body>
+</html>
+
+     ├── requests.html
+     <!doctype html>
+<html>
+<head><meta charset="utf-8"/><title>Requests</title><link rel="stylesheet" href="style.css"></head>
+<body>
+  <div class="header"><h2>All Requests</h2><div><a class="btn" href="create-request.html">Create</a></div></div>
+  <div id="list"></div>
+  <script>
+    const API_BASE = "http://localhost:5000/api";
+    async function load(page=1){
+      const res = await fetch(`${API_BASE}/request/all?page=${page}&limit=20`);
+      const j = await res.json();
+      const list = document.getElementById("list");
+      list.innerHTML = "";
+      if(j.data && j.data.length){
+        j.data.forEach(r=>{
+          const d = document.createElement("div");
+          d.className = "card";
+          d.innerHTML = `<div class="flex"><strong>${r.type} — ${r.name}</strong><span class="right small">${new Date(r.createdAt).toLocaleString()}</span></div>
+            <p class="small">${r.city} · ${r.blood} · ${r.phone}</p>
+            <p>${r.description||""}</p>`;
+          list.appendChild(d);
+        });
+      } else list.innerHTML = "<p class='small'>No requests</p>";
+    }
+    load();
+  </script>
+</body>
+</html>
+
+     ├── create-request.html
+     <!doctype html>
+<html>
+<head><meta charset="utf-8"/><title>Create Request</title><link rel="stylesheet" href="style.css"></head>
+<body>
+  <div class="header"><h2>Create Request</h2><div><a class="btn" href="requests.html">All Requests</a></div></div>
+  <div class="card">
+    <div class="form-group"><label>Type</label><input id="type" placeholder="مثال: طلب تبرع"></div>
+    <div class="form-group"><label>Name</label><input id="name"></div>
+    <div class="form-group"><label>City</label><input id="city"></div>
+    <div class="form-group"><label>Phone</label><input id="phone"></div>
+    <div class="form-group"><label>Blood Type</label><input id="blood"></div>
+    <div class="form-group"><label>Description</label><textarea id="description"></textarea></div>
+    <div class="form-group"><label>GPS (optional)</label><input id="gps"></div>
+    <button id="submit" class="btn">Create</button>
+    <p id="msg" class="small"></p>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:5000/api";
+    document.getElementById("submit").onclick = async () => {
+      const token = localStorage.getItem("token");
+      const body = {
+        type: document.getElementById("type").value,
+        name: document.getElementById("name").value,
+        city: document.getElementById("city").value,
+        phone: document.getElementById("phone").value,
+        blood: document.getElementById("blood").value,
+        description: document.getElementById("description").value,
+        gps: document.getElementById("gps").value
+      };
+      const msg = document.getElementById("msg");
+      if(!token){ msg.textContent = "Please login first"; return; }
+      const res = await fetch(`${API_BASE}/request/create`, {
+        method:"POST",
+        headers: {"Content-Type":"application/json", "Authorization": "Bearer "+token},
+        body: JSON.stringify(body)
+      });
+      const j = await res.json();
+      msg.textContent = j.msg || JSON.stringify(j);
+      if(res.status === 201) setTimeout(()=> location.href="requests.html",700);
+    };
+  </script>
+</body>
+</html>
+
+     ├── login.html
+     <!doctype html>
+<html>
+<head><meta charset="utf-8"/><title>Login</title><link rel="stylesheet" href="style.css"></head>
+<body>
+  <div class="header"><h2>Login</h2><div><a class="btn" href="register.html">Register</a></div></div>
+  <div class="card">
+    <div class="form-group"><label>Email</label><input id="email" type="email"></div>
+    <div class="form-group"><label>Password</label><input id="password" type="password"></div>
+    <button id="submit" class="btn">Login</button>
+    <p id="msg" class="small"></p>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:5000/api";
+    document.getElementById("submit").onclick = async () => {
+      const email = document.getElementById("email").value.trim();
+      const password = document.getElementById("password").value;
+      const msg = document.getElementById("msg");
+      const res = await fetch(`${API_BASE}/auth/login`, {
+        method:"POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({email,password})
+      });
+      const j = await res.json();
+      if(res.ok){
+        localStorage.setItem("token", j.token);
+        localStorage.setItem("user", JSON.stringify(j.user));
+        msg.textContent = "تم تسجيل الدخول";
+        setTimeout(()=> location.href="index.html",600);
+      } else {
+        msg.textContent = j.msg || JSON.stringify(j);
+      }
+    };
+  </script>
+</body>
+</html>
+
+     ├── register.html
+     <!doctype html>
+<html>
+<head><meta charset="utf-8"/><title>Register</title><link rel="stylesheet" href="style.css"></head>
+<body>
+  <div class="header"><h2>Register</h2><div><a class="btn" href="login.html">Login</a></div></div>
+  <div class="card">
+    <div class="form-group"><label>Name</label><input id="name"></div>
+    <div class="form-group"><label>Email</label><input id="email" type="email"></div>
+    <div class="form-group"><label>Password</label><input id="password" type="password"></div>
+    <button id="submit" class="btn">Register</button>
+    <p id="msg" class="small"></p>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:5000/api";
+    document.getElementById("submit").onclick = async () => {
+      const name = document.getElementById("name").value.trim();
+      const email = document.getElementById("email").value.trim();
+      const password = document.getElementById("password").value;
+      const msg = document.getElementById("msg");
+      const res = await fetch(`${API_BASE}/auth/register`, {
+        method:"POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({name,email,password})
+      });
+      const j = await res.json();
+      msg.textContent = j.msg || JSON.stringify(j);
+      if(res.status===201) setTimeout(()=> location.href="login.html",800);
+    };
+  </script>
+</body>
+</html>
+
+     ├── admin.html
+     <!doctype html>
+<html>
+<head><meta charset="utf-8"/><title>Admin</title><link rel="stylesheet" href="style.css"></head>
+<body>
+  <div class="header"><h2>Admin Panel</h2><div><a class="btn" href="index.html">Home</a></div></div>
+  <div id="status" class="small token-info"></div>
+  <div id="users" class="card"></div>
+  <div id="requests" class="card"></div>
+
+  <script>
+    const API_BASE = "http://localhost:5000/api";
+    const token = localStorage.getItem("token");
+    const user = JSON.parse(localStorage.getItem("user")||"null");
+    document.getElementById("status").textContent = user ? `Logged as ${user.name} (${user.role})` : "Not logged";
+
+    async function loadUsers(){
+      if(!token) return document.getElementById("users").innerHTML = "Login as admin";
+      const res = await fetch(`${API_BASE}/admin/users`, {
+        headers: { Authorization: "Bearer " + token }
+      });
+      const j = await res.json();
+      const el = document.getElementById("users");
+      if(!res.ok) return el.innerHTML = JSON.stringify(j);
+      el.innerHTML = "<h3>Users</h3>";
+      j.users.forEach(u=>{
+        const div = document.createElement("div");
+        div.className = "card";
+        div.innerHTML = `<strong>${u.name}</strong> <span class="small"> ${u.email} </span> ${u.role==="admin" ? '<span class="admin-badge">Admin</span>':''}
+          <div class="flex">
+            <button class="btn" onclick="promote('${u._id}')">Promote</button>
+          </div>`;
+        el.appendChild(div);
+      });
+    }
+
+    async function promote(id){
+      const res = await fetch(`${API_BASE}/admin/promote/${id}`, {
+        method: "POST",
+        headers: { Authorization: "Bearer " + token }
+      });
+      const j = await res.json();
+      alert(j.msg || JSON.stringify(j));
+      loadUsers();
+    }
+
+    loadUsers();
+  </script>
+</body>
+</html>
+
+     ├── style.css
+     body{font-family: Arial, sans-serif;max-width:980px;margin:20px auto;padding:10px;color:#222}
+.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+.card{border:1px solid #eee;padding:12px;border-radius:8px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.03)}
+.btn{display:inline-block;padding:8px 12px;border-radius:6px;background:#007bff;color:#fff;text-decoration:none}
+.form-group{margin-bottom:8px}
+input,select,textarea{width:100%;padding:8px;border-radius:6px;border:1px solid #ddd}
+.nav{margin-bottom:12px}
+.token-info{font-size:12px;color:#666}
+.small{font-size:13px;color:#555}
+.flex{display:flex;gap:8px;align-items:center}
+.right{margin-left:auto}
+.admin-badge{background:#ffc107;padding:4px 8px;border-radius:6px;color:#000}
